@@ -4,7 +4,9 @@ import streamlit as st
 
 st.set_page_config(page_title="Painel de Pacotes", layout="wide")
 
-APP_TITLE = "📦 Painel de Pacotes (sem senha)"
+APP_TITLE = "📦 Painel de Pacotes (Excel .xlsx)"
+FILE_PATH = "CONTROLE_LOGISTICO_FORMATADO_COM_FORMULAS.xlsx"
+
 TRACK_COL = "Código de Rastreio"
 CLIENT_COL = "Cliente"
 STATUS_COL = "Status"
@@ -20,19 +22,16 @@ def limpar_codigo(valor) -> str:
 
 @st.cache_data(ttl=CACHE_TTL)
 def carregar_dados() -> pd.DataFrame:
-    csv_url = st.secrets.get("CSV_URL", "").strip()
     try:
-        if csv_url:
-            df = pd.read_csv(csv_url, sep=None, engine="python", encoding="utf-8-sig")
-        else:
-            df = pd.read_csv("pacotes.csv", sep=None, engine="python", encoding="utf-8-sig")
+        # Lê a primeira aba do Excel
+        df = pd.read_excel(FILE_PATH, engine="openpyxl")
     except Exception as e:
-        st.error("Não consegui ler os dados.")
+        st.error("Não consegui abrir o Excel (.xlsx).")
         st.code(str(e))
-        st.info("Se usa planilha: configure o Secrets CSV_URL. Se usa arquivo: confirme que existe pacotes.csv no repo.")
+        st.info(f"Confirme se o arquivo está na raiz do repo com esse nome: {FILE_PATH}")
         st.stop()
 
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
 
     if TRACK_COL in df.columns:
         df[TRACK_COL] = df[TRACK_COL].apply(limpar_codigo)
