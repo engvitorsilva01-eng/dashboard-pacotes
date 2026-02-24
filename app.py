@@ -1,122 +1,251 @@
-import streamlit as st
+import re
 import pandas as pd
-from datetime import datetime
+import streamlit as st
 
-st.set_page_config(page_title="Pacotes — Dias em Espera", layout="wide")
+# Auto refresh (opcional). Se não tiver a lib, o app continua sem auto refresh.
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 
-ARQ = "CONTROLE_LOGISTICO_FORMATADO_COM_FORMULAS.xlsx"
-ABA = "PACOTES"
+st.set_page_config(page_title="Painel de Pacotes", layout="wide")
 
-st.title("📦 Painel de Pacotes — Dias em Espera")
-st.caption("**Dias em espera** = dias corridos desde a **Data do envio**. Use os filtros para refinar.")
-st.markdown(f"🕒 **Atualizado em:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-st.divider()
+# =========================
+# CONFIG GERAL
+# =========================
+APP_TITLE = "📦 Painel de Pacotes"
+DEFAULT_TTL_SECONDS = 60            # recarrega os dados a cada X segundos (cache)
+AUTOREFRESH_EVERY_SECONDS = 60      # recarrega a tela a cada X segundos (opcional)
 
-@st.cache_data(ttl=60)
-def carregar_excel():
-    df = pd.read_excel(ARQ, sheet_name=ABA)
-    df.columns = [str(c).strip() for c in df.columns]
+# =========================
+# DADOS: escolha a fonte
+# =========================
+DATA_MODE = "csv_local"  # "csv_local" ou "csv_url"
+
+CSV_LOCAL_PATH = "pacotes.csv"
+CSV_URL = "https://SEU-LINK-CSV-AQUI"
+
+# =========================
+# COLUNAS (ajuste conforme sua planilha)
+# =========================
+CLIENT_COL = "Cliente"
+STATUS_COL = "Status"
+
+# ✅ Nome exato informado por você:
+TRACK_COL = "Código de Rastreio"
+
+# Link oficial de rastreio (abre já com o código)
+CORREIOS_TRACK_URL = "https://rastreamento.correios.com.br/app/index.php?objetos="
+
+# =========================
+# FUNÇÕES
+# =========================
+def limpar_codigo_rastreio(valor) -> str:
+    """Remove espaços, hífens e qualquer caractere que não seja A-Z/0-9."""
+    if pd.isna(valor):
+        return ""
+    s = str(valor).strip().upper()
+    s = re.sub(r"[^A-Z0-9]", "", s)
+    return s
+
+def login_gate() -> bool:
+    """Login simples com 1 senha em st.secrets['APP_PASSWORD']."""
+    st.sidebar.header("🔒 Acesso")
+    if "authed" not in st.session_state:
+        st.session_state.authed = False
+
+    if st.session_state.authed:
+        st.sidebar.success("Acesso liberado")
+        if st.sidebar.button("Sair"):
+            st.session_state.authed = False
+            st.rerun()
+        return True
+
+    pwd = st.sidebar.text_input("Senha", type="password")
+    if st.sidebar.button("Entrar"):
+        real_pwd = st.secrets.get("APP_PASSWORD", "")
+        if pwd and real_pwd and pwd == real_pwd:
+            st.session_state.authed = True
+            st.rerun()
+        else:
+            st.sidebar.error("Senha incorreta.")
+    return False
+
+@st.cache_data(ttl=DEFAULT_TTL_SECONDS)
+def load_data() -> pd.DataFrame:
+    """Carrega CSV e cria coluna de link clicável para rastreio."""
+    if DATA_MODE == "csv_url":
+        df = pd.read_csv(CSV_URL)
+    else:
+        # Se der erro de acento/encoding, troque para: encoding="utf-8-sig"
+        df = pd.read_csv(CSV_LOCAL_PATH)
+
+    df.columns = [c.strip() for c in df.columns]
+
+    # Cria a coluna de link clicável (se existir coluna de rastreio)
+    if TRACK_COL in df.columns:
+        df[TRACK_COL] = df[TRACK_COL].apply(limpar_codigo_rastreio)
+        df["Rastreio (link)"] = df[TRACK_COL].apply(
+            lambda code: (CORREIOS_TRACK_URL + code) if code else ""
+        )
+
     return df
 
-df = carregar_excel()
+def clear_cache():
+    load_data.clear()
 
-# Datas
-for col in ["Data do pedido", "Data do envio", "Data de recebimento"]:
-    if col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
+def build_search_mask(df: pd.DataFrame, term: str) -> pd.Series:
+    """Cria máscara de busca em colunas texto."""
+    term = term.strip().lower()
+    if not term:
+        return pd.Series([True] * len(df), index=df.index)
 
-# Checagem mínima
-necessarias = ["Pacote", "Status", "Dias desde envio"]
-faltando = [c for c in necessarias if c not in df.columns]
-if faltando:
-    st.error("⚠️ Faltam colunas na aba PACOTES: " + ", ".join(faltando))
+    mask = pd.Series([False] * len(df), index=df.index)
+    for col in df.columns:
+        if df[col].dtype == "object":
+            mask = mask | df[col].fillna("").astype(str).str.lower().str.contains(term, regex=False)
+    return mask
+
+# =========================
+# UI
+# =========================
+st.title(APP_TITLE)
+
+# Auto refresh (opcional)
+if st_autorefresh is not None:
+    st_autorefresh(interval=AUTOREFRESH_EVERY_SECONDS * 1000, key="auto_refresh")
+
+if not login_gate():
     st.stop()
 
-# Renomear para ficar didático
-df = df.rename(columns={"Dias desde envio": "Dias em espera"})
+top1, top2, top3, top4 = st.columns([1, 1, 1, 2])
+with top1:
+    if st.button("🔄 Atualizar agora"):
+        clear_cache()
+        st.rerun()
+with top2:
+    st.caption(f"Cache dados: {DEFAULT_TTL_SECONDS}s")
+with top3:
+    st.caption(f"Auto refresh: {AUTOREFRESH_EVERY_SECONDS}s" if st_autorefresh else "Auto refresh: desativado")
+with top4:
+    st.caption("Dica: clique no código de rastreio para abrir o site.")
 
-def faixa_humana(d):
-    if pd.isna(d): return "Sem data"
-    try:
-        d = int(d)
-    except:
-        return "Sem data"
-    if d <= 5: return "Até 5 dias"
-    if d <= 10: return "6 a 10 dias"
-    if d <= 20: return "11 a 20 dias"
-    return "21+ dias"
+df = load_data()
 
-df["Faixa"] = df["Dias em espera"].apply(faixa_humana)
+# =========================
+# FILTROS
+# =========================
+st.subheader("Filtros")
+c1, c2, c3, c4 = st.columns(4)
 
-# ===== FILTROS =====
-st.sidebar.header("Filtros")
-status_lista = ["Todos"] + sorted(df["Status"].dropna().unique().tolist())
-status = st.sidebar.selectbox("Status", status_lista)
+# Cliente
+clientes = ["Todos"]
+if CLIENT_COL in df.columns:
+    clientes += sorted([x for x in df[CLIENT_COL].dropna().unique()])
 
-faixas_ordem = ["Todas", "Até 5 dias", "6 a 10 dias", "11 a 20 dias", "21+ dias", "Sem data"]
-faixa = st.sidebar.selectbox("Faixa de dias", faixas_ordem)
+# Status
+status_list = ["Todos"]
+if STATUS_COL in df.columns:
+    status_list += sorted([x for x in df[STATUS_COL].dropna().unique()])
 
-df_f = df.copy()
-if status != "Todos":
-    df_f = df_f[df_f["Status"] == status]
-if faixa != "Todas":
-    df_f = df_f[df_f["Faixa"] == faixa]
+with c1:
+    cliente_sel = st.selectbox("Cliente", clientes)
+with c2:
+    status_sel = st.selectbox("Status", status_list)
+with c3:
+    busca = st.text_input("Buscar (qualquer campo)", "")
+with c4:
+    cols_default = list(df.columns)
+    # Prioriza mostrar campos comuns no começo
+    prefer = [CLIENT_COL, "Pedido", TRACK_COL, STATUS_COL]
+    prefer = [p for p in prefer if p in cols_default]
+    rest = [c for c in cols_default if c not in prefer and c != "Rastreio (link)"]
+    cols_default = prefer + rest
 
-# ===== CONTADORES (BEM VISÍVEIS) =====
-total = len(df_f)
-qtd_recebidos = int((df_f["Status"] == "Recebido").sum())
-qtd_transito = int((df_f["Status"] == "Em trânsito").sum())
+    show_cols = st.multiselect(
+        "Colunas para exibir",
+        options=[c for c in df.columns if c != "Rastreio (link)"],
+        default=cols_default[:8] if len(cols_default) > 8 else cols_default
+    )
 
-# ===== INDICADORES PRINCIPAIS =====
-max_dias = int(df_f["Dias em espera"].max()) if total and df_f["Dias em espera"].notna().any() else 0
-media_dias = round(float(df_f["Dias em espera"].mean()), 1) if total else 0
+fdf = df.copy()
 
-pacote_top = "-"
-if total and df_f["Dias em espera"].notna().any():
-    pacote_top = str(df_f.sort_values("Dias em espera", ascending=False).iloc[0]["Pacote"])
+if cliente_sel != "Todos" and CLIENT_COL in fdf.columns:
+    fdf = fdf[fdf[CLIENT_COL] == cliente_sel]
 
-qtd_21 = int((df_f["Faixa"] == "21+ dias").sum())
+if status_sel != "Todos" and STATUS_COL in fdf.columns:
+    fdf = fdf[fdf[STATUS_COL] == status_sel]
 
-# Linha 1 (o que você pediu: recebidos e em trânsito)
-a1, a2, a3 = st.columns(3)
-a1.metric("📦 Total de pacotes", total)
-a2.metric("✅ Recebidos", qtd_recebidos)
-a3.metric("🚚 Em trânsito", qtd_transito)
+mask_busca = build_search_mask(fdf, busca)
+fdf = fdf[mask_busca]
 
-# Linha 2 (tempo de espera)
-b1, b2, b3, b4 = st.columns(4)
-b1.metric("⏱️ Maior espera (dias)", max_dias)
-b2.metric("🏷️ Pacote mais atrasado", pacote_top)
-b3.metric("📈 Média (dias)", media_dias)
-b4.metric("🔥 Pacotes 21+ dias", qtd_21)
+# =========================
+# RESUMO
+# =========================
+st.subheader("Resumo")
+m1, m2, m3, m4 = st.columns(4)
+total = len(fdf)
+m1.metric("Total (com filtros)", total)
 
-st.divider()
+if STATUS_COL in fdf.columns:
+    entregues = fdf[STATUS_COL].astype(str).str.lower().str.contains("entreg", na=False).sum()
+    transito = fdf[STATUS_COL].astype(str).str.lower().str.contains("transit|enviado|rota", na=False).sum()
+    outros = total - entregues - transito
+    m2.metric("Entregues", int(entregues))
+    m3.metric("Em trânsito", int(transito))
+    m4.metric("Outros", int(outros))
+else:
+    m2.metric("Entregues", "-")
+    m3.metric("Em trânsito", "-")
+    m4.metric("Outros", "-")
 
-# ===== GRÁFICO =====
-st.subheader("📊 Quantos pacotes por faixa de dias em espera")
-ordem = ["Até 5 dias", "6 a 10 dias", "11 a 20 dias", "21+ dias", "Sem data"]
-dist = df_f["Faixa"].value_counts().reindex(ordem, fill_value=0)
-st.bar_chart(dist)
+# =========================
+# TABELA (código clicável)
+# =========================
+st.subheader("Lista")
 
-st.divider()
+if not show_cols:
+    show_cols = [c for c in fdf.columns if c != "Rastreio (link)"]
 
-# ===== RANKING PRINCIPAL =====
-st.subheader("🏆 Ranking — pacotes com mais dias em espera")
+table_df = fdf.copy()
+column_config = {}
 
-cols_rank = [c for c in ["Pacote", "Status", "Dias em espera", "Data do envio", "Data de recebimento"] if c in df_f.columns]
-rank = df_f.sort_values("Dias em espera", ascending=False)[cols_rank].head(50).copy()
+# Se existir rastreio, a própria coluna "Código de Rastreio" vira clicável
+if "Rastreio (link)" in table_df.columns and TRACK_COL in table_df.columns:
+    table_df["Código (clique)"] = table_df["Rastreio (link)"]
 
-# Formatar datas
-if "Data do envio" in rank.columns:
-    rank["Data do envio"] = pd.to_datetime(rank["Data do envio"], errors="coerce").dt.strftime("%d/%m/%Y")
-if "Data de recebimento" in rank.columns:
-    rank["Data de recebimento"] = pd.to_datetime(rank["Data de recebimento"], errors="coerce").dt.strftime("%d/%m/%Y")
+    display_cols = []
+    for c in show_cols:
+        if c == TRACK_COL:
+            display_cols.append("Código (clique)")
+        else:
+            if c in table_df.columns:
+                display_cols.append(c)
 
-st.dataframe(rank, use_container_width=True)
+    if "Código (clique)" not in display_cols:
+        display_cols.insert(0, "Código (clique)")
 
-st.divider()
+    column_config["Código (clique)"] = st.column_config.LinkColumn(
+        "Código de Rastreio (clique)",
+        display_text=r".*objetos=([A-Z0-9]+)$"  # mostra só o código, mas clica no link
+    )
+else:
+    display_cols = show_cols
 
-# ===== EXPORTAR =====
-st.subheader("📥 Exportar relatório")
-csv = df_f.drop(columns=["Faixa"], errors="ignore").to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Baixar CSV", csv, "relatorio_pacotes.csv", "text/csv")
+st.data_editor(
+    table_df[display_cols],
+    use_container_width=True,
+    hide_index=True,
+    disabled=True,
+    column_config=column_config
+)
+
+# =========================
+# EXPORT
+# =========================
+st.download_button(
+    "⬇️ Baixar CSV (com filtros)",
+    data=fdf.to_csv(index=False).encode("utf-8"),
+    file_name="pacotes_filtrados.csv",
+    mime="text/csv"
+)
