@@ -2,26 +2,16 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="Painel de Pacotes", layout="wide")
+st.set_page_config(page_title="Pacotes — Dias em Espera", layout="wide")
 
-# ====== CONFIG ======
 ARQ = "CONTROLE_LOGISTICO_FORMATADO_COM_FORMULAS.xlsx"
 ABA = "PACOTES"
 
-# ====== TOPO ======
-st.title("📦 Painel de Pacotes — Controle Logístico")
-st.caption(
-    "✅ Este painel mostra o **status dos pacotes** e o **tempo desde o envio**.\n\n"
-    "➡️ Use o **filtro à esquerda** para ver apenas *Recebidos* ou *Em trânsito*.\n\n"
-    "ℹ️ **Dias desde envio** = dias corridos desde a **Data do envio**."
-)
-
-# Hora de atualização (visual)
+st.title("📦 Painel de Pacotes — Dias em Espera")
+st.caption("**Dias em espera** = dias corridos desde a **Data do envio**. Use os filtros para refinar.")
 st.markdown(f"🕒 **Atualizado em:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-
 st.divider()
 
-# ====== LEITURA ======
 @st.cache_data(ttl=60)
 def carregar_excel():
     df = pd.read_excel(ARQ, sheet_name=ABA)
@@ -30,111 +20,99 @@ def carregar_excel():
 
 df = carregar_excel()
 
-# Converter datas (se existirem)
+# Datas
 for col in ["Data do pedido", "Data do envio", "Data de recebimento"]:
     if col in df.columns:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-# Checagem de colunas (evita quebrar o app)
+# Checagem mínima
 necessarias = ["Pacote", "Status", "Dias desde envio"]
 faltando = [c for c in necessarias if c not in df.columns]
 if faltando:
-    st.error("⚠️ A planilha está sem estas colunas na aba PACOTES: " + ", ".join(faltando))
+    st.error("⚠️ Faltam colunas na aba PACOTES: " + ", ".join(faltando))
     st.stop()
 
-# ====== FILTRO ======
-st.sidebar.header("Filtro")
-status_lista = ["Todos"] + sorted(df["Status"].dropna().unique().tolist())
-status = st.sidebar.selectbox("Status", status_lista)
+# Renomear para ficar didático
+df = df.rename(columns={"Dias desde envio": "Dias em espera"})
 
-df_f = df.copy() if status == "Todos" else df[df["Status"] == status].copy()
-
-# ====== MÉTRICAS ======
-c1, c2, c3, c4 = st.columns(4)
-
-total = len(df_f)
-recebidos = int((df_f["Status"] == "Recebido").sum())
-em_transito = int((df_f["Status"] == "Em trânsito").sum())
-media_dias = round(float(df_f["Dias desde envio"].mean()), 1) if total else 0
-
-c1.metric("📦 Total de pacotes", total)
-c2.metric("✅ Recebidos", recebidos)
-c3.metric("🚚 Em trânsito", em_transito)
-c4.metric("⏱️ Média (dias desde envio)", media_dias)
-
-st.divider()
-
-# ====== FAIXAS MAIS CLARAS ======
 def faixa_humana(d):
-    if pd.isna(d):
-        return "Sem data"
+    if pd.isna(d): return "Sem data"
     try:
         d = int(d)
     except:
         return "Sem data"
-    if d <= 5:
-        return "Até 5 dias"
-    if d <= 10:
-        return "6 a 10 dias"
-    if d <= 20:
-        return "11 a 20 dias"
-    return "Mais de 20 dias"
+    if d <= 5: return "Até 5 dias"
+    if d <= 10: return "6 a 10 dias"
+    if d <= 20: return "11 a 20 dias"
+    return "21+ dias"
 
-df_plot = df_f.copy()
-df_plot["Faixa de dias"] = df_plot["Dias desde envio"].apply(faixa_humana)
+df["Faixa"] = df["Dias em espera"].apply(faixa_humana)
 
-ordem = ["Até 5 dias", "6 a 10 dias", "11 a 20 dias", "Mais de 20 dias", "Sem data"]
-dist = df_plot["Faixa de dias"].value_counts().reindex(ordem, fill_value=0)
+# ===== FILTROS =====
+st.sidebar.header("Filtros")
+status_lista = ["Todos"] + sorted(df["Status"].dropna().unique().tolist())
+status = st.sidebar.selectbox("Status", status_lista)
 
-colA, colB = st.columns([1, 1])
+faixas_ordem = ["Todas", "Até 5 dias", "6 a 10 dias", "11 a 20 dias", "21+ dias", "Sem data"]
+faixa = st.sidebar.selectbox("Faixa de dias", faixas_ordem)
 
-with colA:
-    st.subheader("📊 Quantos pacotes por faixa de dias (desde envio)")
-    st.bar_chart(dist)
+df_f = df.copy()
+if status != "Todos":
+    df_f = df_f[df_f["Status"] == status]
+if faixa != "Todas":
+    df_f = df_f[df_f["Faixa"] == faixa]
 
-# ====== TOP DEMORADOS (ENXUTO + CORES) ======
-def cor_status(v):
-    v = str(v).strip().lower()
-    if v == "recebido":
-        return "background-color: #d4edda; color: #155724;"  # verde claro
-    if v == "em trânsito" or v == "em transito":
-        return "background-color: #fff3cd; color: #856404;"  # amarelo claro
-    return "background-color: #f8d7da; color: #721c24;"      # vermelho claro (outros)
+# ===== PLACAR PRINCIPAL =====
+total = len(df_f)
+em_transito = int((df_f["Status"] == "Em trânsito").sum())
+recebidos = int((df_f["Status"] == "Recebido").sum())
 
-with colB:
-    st.subheader("⏳ Top 20 mais demorados (dias desde envio)")
+max_dias = int(df_f["Dias em espera"].max()) if total and df_f["Dias em espera"].notna().any() else 0
+media_dias = round(float(df_f["Dias em espera"].mean()), 1) if total else 0
 
-    # Colunas mais importantes (se existirem)
-    colunas_top = [c for c in ["Pacote", "Status", "Dias desde envio", "Data do envio"] if c in df_f.columns]
+# Pacote mais atrasado
+pacote_top = "-"
+if total and df_f["Dias em espera"].notna().any():
+    linha_top = df_f.sort_values("Dias em espera", ascending=False).iloc[0]
+    pacote_top = str(linha_top["Pacote"])
 
-    top = (
-        df_f.sort_values("Dias desde envio", ascending=False)
-        .loc[:, colunas_top]
-        .head(20)
-        .copy()
-    )
+# Quantos com 21+ (no filtro atual)
+qtd_21 = int((df_f["Faixa"] == "21+ dias").sum())
 
-    # Formatar datas para leitura
-    if "Data do envio" in top.columns:
-        top["Data do envio"] = pd.to_datetime(top["Data do envio"], errors="coerce").dt.strftime("%d/%m/%Y")
-
-    # Estilo com cor no Status
-    if "Status" in top.columns:
-        styler = top.style.applymap(cor_status, subset=["Status"])
-        st.dataframe(styler, use_container_width=True)
-    else:
-        st.dataframe(top, use_container_width=True)
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("📦 Total", total)
+c2.metric("⏱️ Maior espera (dias)", max_dias)
+c3.metric("🏷️ Pacote mais atrasado", pacote_top)
+c4.metric("📈 Média (dias)", media_dias)
+c5.metric("🔥 Pacotes 21+ dias", qtd_21)
 
 st.divider()
 
-# ====== EXPORTAR ======
-st.subheader("📥 Exportar relatório")
-nome_filtro = "Todos" if status == "Todos" else f"Status_{status}".replace(" ", "_")
-csv = df_f.to_csv(index=False).encode("utf-8")
+# ===== GRÁFICO DIDÁTICO =====
+st.subheader("📊 Quantos pacotes por faixa de dias em espera")
+ordem = ["Até 5 dias", "6 a 10 dias", "11 a 20 dias", "21+ dias", "Sem data"]
+dist = df_f["Faixa"].value_counts().reindex(ordem, fill_value=0)
+st.bar_chart(dist)
 
-st.download_button(
-    f"⬇️ Baixar relatório (CSV) — {status}",
-    data=csv,
-    file_name=f"pacotes_{nome_filtro}.csv",
-    mime="text/csv",
-)
+st.divider()
+
+# ===== RANKING PRINCIPAL =====
+st.subheader("🏆 Ranking — pacotes com mais dias em espera")
+
+cols_rank = [c for c in ["Pacote", "Status", "Dias em espera", "Data do envio", "Data de recebimento"] if c in df_f.columns]
+rank = df_f.sort_values("Dias em espera", ascending=False)[cols_rank].head(50).copy()
+
+# Formatar datas para leitura
+if "Data do envio" in rank.columns:
+    rank["Data do envio"] = pd.to_datetime(rank["Data do envio"], errors="coerce").dt.strftime("%d/%m/%Y")
+if "Data de recebimento" in rank.columns:
+    rank["Data de recebimento"] = pd.to_datetime(rank["Data de recebimento"], errors="coerce").dt.strftime("%d/%m/%Y")
+
+st.dataframe(rank, use_container_width=True)
+
+st.divider()
+
+# ===== EXPORTAR =====
+st.subheader("📥 Exportar relatório")
+csv = df_f.drop(columns=["Faixa"], errors="ignore").to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Baixar CSV", csv, "relatorio_pacotes.csv", "text/csv")
