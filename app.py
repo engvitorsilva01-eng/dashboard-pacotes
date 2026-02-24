@@ -62,33 +62,37 @@ if status != "Todos":
 if faixa != "Todas":
     df_f = df_f[df_f["Faixa"] == faixa]
 
-# ===== PLACAR PRINCIPAL =====
+# ===== CONTADORES (BEM VISÍVEIS) =====
 total = len(df_f)
-em_transito = int((df_f["Status"] == "Em trânsito").sum())
-recebidos = int((df_f["Status"] == "Recebido").sum())
+qtd_recebidos = int((df_f["Status"] == "Recebido").sum())
+qtd_transito = int((df_f["Status"] == "Em trânsito").sum())
 
+# ===== INDICADORES PRINCIPAIS =====
 max_dias = int(df_f["Dias em espera"].max()) if total and df_f["Dias em espera"].notna().any() else 0
 media_dias = round(float(df_f["Dias em espera"].mean()), 1) if total else 0
 
-# Pacote mais atrasado
 pacote_top = "-"
 if total and df_f["Dias em espera"].notna().any():
-    linha_top = df_f.sort_values("Dias em espera", ascending=False).iloc[0]
-    pacote_top = str(linha_top["Pacote"])
+    pacote_top = str(df_f.sort_values("Dias em espera", ascending=False).iloc[0]["Pacote"])
 
-# Quantos com 21+ (no filtro atual)
 qtd_21 = int((df_f["Faixa"] == "21+ dias").sum())
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("📦 Total", total)
-c2.metric("⏱️ Maior espera (dias)", max_dias)
-c3.metric("🏷️ Pacote mais atrasado", pacote_top)
-c4.metric("📈 Média (dias)", media_dias)
-c5.metric("🔥 Pacotes 21+ dias", qtd_21)
+# Linha 1 (o que você pediu: recebidos e em trânsito)
+a1, a2, a3 = st.columns(3)
+a1.metric("📦 Total de pacotes", total)
+a2.metric("✅ Recebidos", qtd_recebidos)
+a3.metric("🚚 Em trânsito", qtd_transito)
+
+# Linha 2 (tempo de espera)
+b1, b2, b3, b4 = st.columns(4)
+b1.metric("⏱️ Maior espera (dias)", max_dias)
+b2.metric("🏷️ Pacote mais atrasado", pacote_top)
+b3.metric("📈 Média (dias)", media_dias)
+b4.metric("🔥 Pacotes 21+ dias", qtd_21)
 
 st.divider()
 
-# ===== GRÁFICO DIDÁTICO =====
+# ===== GRÁFICO =====
 st.subheader("📊 Quantos pacotes por faixa de dias em espera")
 ordem = ["Até 5 dias", "6 a 10 dias", "11 a 20 dias", "21+ dias", "Sem data"]
 dist = df_f["Faixa"].value_counts().reindex(ordem, fill_value=0)
@@ -102,7 +106,7 @@ st.subheader("🏆 Ranking — pacotes com mais dias em espera")
 cols_rank = [c for c in ["Pacote", "Status", "Dias em espera", "Data do envio", "Data de recebimento"] if c in df_f.columns]
 rank = df_f.sort_values("Dias em espera", ascending=False)[cols_rank].head(50).copy()
 
-# Formatar datas para leitura
+# Formatar datas
 if "Data do envio" in rank.columns:
     rank["Data do envio"] = pd.to_datetime(rank["Data do envio"], errors="coerce").dt.strftime("%d/%m/%Y")
 if "Data de recebimento" in rank.columns:
