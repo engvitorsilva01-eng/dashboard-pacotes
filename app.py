@@ -67,4 +67,5 @@ st.dataframe(df_f, use_container_width=True)
 
 # Download CSV
 csv = df_f.to_csv(index=False).encode("utf-8")
+
 st.download_button("⬇️ Baixar CSV (filtrado)", csv, "pacotes_filtrados.csv", "text/csv")
