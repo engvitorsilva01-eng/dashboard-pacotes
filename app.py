@@ -2,7 +2,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-# Auto refresh (opcional). Se não tiver a lib, o app continua sem auto refresh.
+# Auto refresh (opcional). Se não tiver a lib, o app funciona sem auto refresh.
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
@@ -11,78 +11,49 @@ except Exception:
 st.set_page_config(page_title="Painel de Pacotes", layout="wide")
 
 # =========================
-# CONFIG GERAL
+# CONFIG
 # =========================
 APP_TITLE = "📦 Painel de Pacotes"
-DEFAULT_TTL_SECONDS = 60            # recarrega os dados a cada X segundos (cache)
+DEFAULT_TTL_SECONDS = 60            # atualiza dados no cache a cada X segundos
 AUTOREFRESH_EVERY_SECONDS = 60      # recarrega a tela a cada X segundos (opcional)
 
 # =========================
-# DADOS: escolha a fonte
+# DADOS
 # =========================
 DATA_MODE = "csv_local"  # "csv_local" ou "csv_url"
-
 CSV_LOCAL_PATH = "pacotes.csv"
 CSV_URL = "https://SEU-LINK-CSV-AQUI"
 
 # =========================
-# COLUNAS (ajuste conforme sua planilha)
+# COLUNAS (como está na planilha)
 # =========================
 CLIENT_COL = "Cliente"
 STATUS_COL = "Status"
+TRACK_COL = "Código de Rastreio"   # <- você confirmou esse nome
 
-# ✅ Nome exato informado por você:
-TRACK_COL = "Código de Rastreio"
-
-# Link oficial de rastreio (abre já com o código)
 CORREIOS_TRACK_URL = "https://rastreamento.correios.com.br/app/index.php?objetos="
 
 # =========================
 # FUNÇÕES
 # =========================
 def limpar_codigo_rastreio(valor) -> str:
-    """Remove espaços, hífens e qualquer caractere que não seja A-Z/0-9."""
     if pd.isna(valor):
         return ""
     s = str(valor).strip().upper()
-    s = re.sub(r"[^A-Z0-9]", "", s)
+    s = re.sub(r"[^A-Z0-9]", "", s)  # remove espaços, hífen, etc.
     return s
-
-def login_gate() -> bool:
-    """Login simples com 1 senha em st.secrets['APP_PASSWORD']."""
-    st.sidebar.header("🔒 Acesso")
-    if "authed" not in st.session_state:
-        st.session_state.authed = False
-
-    if st.session_state.authed:
-        st.sidebar.success("Acesso liberado")
-        if st.sidebar.button("Sair"):
-            st.session_state.authed = False
-            st.rerun()
-        return True
-
-    pwd = st.sidebar.text_input("Senha", type="password")
-    if st.sidebar.button("Entrar"):
-        real_pwd = st.secrets.get("APP_PASSWORD", "")
-        if pwd and real_pwd and pwd == real_pwd:
-            st.session_state.authed = True
-            st.rerun()
-        else:
-            st.sidebar.error("Senha incorreta.")
-    return False
 
 @st.cache_data(ttl=DEFAULT_TTL_SECONDS)
 def load_data() -> pd.DataFrame:
-    """Carrega CSV e cria coluna de link clicável para rastreio."""
     if DATA_MODE == "csv_url":
         df = pd.read_csv(CSV_URL)
     else:
-        # Se der erro de acento/encoding, troque para: encoding="utf-8-sig"
+        # se der problema com acento, use: pd.read_csv(CSV_LOCAL_PATH, encoding="utf-8-sig")
         df = pd.read_csv(CSV_LOCAL_PATH)
 
     df.columns = [c.strip() for c in df.columns]
 
-    # Cria a coluna de link clicável (se existir coluna de rastreio)
+    # Coluna de link clicável do rastreio
     if TRACK_COL in df.columns:
         df[TRACK_COL] = df[TRACK_COL].apply(limpar_codigo_rastreio)
         df["Rastreio (link)"] = df[TRACK_COL].apply(
@@ -95,7 +66,6 @@ def clear_cache():
     load_data.clear()
 
 def build_search_mask(df: pd.DataFrame, term: str) -> pd.Series:
-    """Cria máscara de busca em colunas texto."""
     term = term.strip().lower()
     if not term:
         return pd.Series([True] * len(df), index=df.index)
@@ -106,6 +76,16 @@ def build_search_mask(df: pd.DataFrame, term: str) -> pd.Series:
             mask = mask | df[col].fillna("").astype(str).str.lower().str.contains(term, regex=False)
     return mask
 
+def get_query_params():
+    # Compatibilidade com versões diferentes do Streamlit
+    try:
+        qp = st.query_params  # versões novas
+        return {k: str(v) for k, v in qp.items()}
+    except Exception:
+        qp = st.experimental_get_query_params()  # versões antigas
+        # qp vem como dict[str, list[str]]
+        return {k: (v[0] if isinstance(v, list) and v else str(v)) for k, v in qp.items()}
+
 # =========================
 # UI
 # =========================
@@ -115,10 +95,7 @@ st.title(APP_TITLE)
 if st_autorefresh is not None:
     st_autorefresh(interval=AUTOREFRESH_EVERY_SECONDS * 1000, key="auto_refresh")
 
-if not login_gate():
-    st.stop()
-
-top1, top2, top3, top4 = st.columns([1, 1, 1, 2])
+top1, top2, top3 = st.columns([1, 1, 2])
 with top1:
     if st.button("🔄 Atualizar agora"):
         clear_cache()
@@ -126,11 +103,10 @@ with top1:
 with top2:
     st.caption(f"Cache dados: {DEFAULT_TTL_SECONDS}s")
 with top3:
-    st.caption(f"Auto refresh: {AUTOREFRESH_EVERY_SECONDS}s" if st_autorefresh else "Auto refresh: desativado")
-with top4:
-    st.caption("Dica: clique no código de rastreio para abrir o site.")
+    st.caption("Clique no código de rastreio para abrir o site.")
 
 df = load_data()
+qp = get_query_params()
 
 # =========================
 # FILTROS
@@ -138,28 +114,41 @@ df = load_data()
 st.subheader("Filtros")
 c1, c2, c3, c4 = st.columns(4)
 
-# Cliente
 clientes = ["Todos"]
 if CLIENT_COL in df.columns:
     clientes += sorted([x for x in df[CLIENT_COL].dropna().unique()])
 
-# Status
 status_list = ["Todos"]
 if STATUS_COL in df.columns:
     status_list += sorted([x for x in df[STATUS_COL].dropna().unique()])
 
+# ✅ Opcional: se você mandar pro cliente um link com ?cliente=NOME,
+# ele já abre filtrado (não é “segurança”, mas facilita).
+cliente_forcado = qp.get("cliente", "").strip()
+status_forcado = qp.get("status", "").strip()
+
 with c1:
-    cliente_sel = st.selectbox("Cliente", clientes)
+    if cliente_forcado and CLIENT_COL in df.columns:
+        cliente_sel = cliente_forcado
+        st.text_input("Cliente (fixo pelo link)", value=cliente_sel, disabled=True)
+    else:
+        cliente_sel = st.selectbox("Cliente", clientes)
+
 with c2:
-    status_sel = st.selectbox("Status", status_list)
+    if status_forcado and STATUS_COL in df.columns:
+        status_sel = status_forcado
+        st.text_input("Status (fixo pelo link)", value=status_sel, disabled=True)
+    else:
+        status_sel = st.selectbox("Status", status_list)
+
 with c3:
-    busca = st.text_input("Buscar (qualquer campo)", "")
+    busca = st.text_input("Buscar (qualquer campo)", qp.get("busca", ""))
+
 with c4:
-    cols_default = list(df.columns)
-    # Prioriza mostrar campos comuns no começo
+    cols_default = [c for c in df.columns if c != "Rastreio (link)"]
     prefer = [CLIENT_COL, "Pedido", TRACK_COL, STATUS_COL]
     prefer = [p for p in prefer if p in cols_default]
-    rest = [c for c in cols_default if c not in prefer and c != "Rastreio (link)"]
+    rest = [c for c in cols_default if c not in prefer]
     cols_default = prefer + rest
 
     show_cols = st.multiselect(
@@ -176,14 +165,14 @@ if cliente_sel != "Todos" and CLIENT_COL in fdf.columns:
 if status_sel != "Todos" and STATUS_COL in fdf.columns:
     fdf = fdf[fdf[STATUS_COL] == status_sel]
 
-mask_busca = build_search_mask(fdf, busca)
-fdf = fdf[mask_busca]
+fdf = fdf[build_search_mask(fdf, busca)]
 
 # =========================
 # RESUMO
 # =========================
 st.subheader("Resumo")
 m1, m2, m3, m4 = st.columns(4)
+
 total = len(fdf)
 m1.metric("Total (com filtros)", total)
 
@@ -210,7 +199,7 @@ if not show_cols:
 table_df = fdf.copy()
 column_config = {}
 
-# Se existir rastreio, a própria coluna "Código de Rastreio" vira clicável
+# Torna a coluna "Código de Rastreio" clicável
 if "Rastreio (link)" in table_df.columns and TRACK_COL in table_df.columns:
     table_df["Código (clique)"] = table_df["Rastreio (link)"]
 
@@ -227,7 +216,7 @@ if "Rastreio (link)" in table_df.columns and TRACK_COL in table_df.columns:
 
     column_config["Código (clique)"] = st.column_config.LinkColumn(
         "Código de Rastreio (clique)",
-        display_text=r".*objetos=([A-Z0-9]+)$"  # mostra só o código, mas clica no link
+        display_text=r".*objetos=([A-Z0-9]+)$"
     )
 else:
     display_cols = show_cols
