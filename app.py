@@ -1,5 +1,7 @@
 import re
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import streamlit as st
 
@@ -21,8 +23,12 @@ CORREIOS_URL = "https://rastreamento.correios.com.br/app/index.php?objetos="
 CACHE_TTL = 20
 
 ALERTA_DIAS = 40  # 40+ dias em trânsito => ATENÇÃO
+TZ = ZoneInfo("America/Fortaleza")
 
 # ========= FUNÇÕES =========
+def hoje_local() -> date:
+    return datetime.now(TZ).date()
+
 def limpar_codigo(valor) -> str:
     if pd.isna(valor):
         return ""
@@ -79,8 +85,8 @@ def carregar_dados() -> pd.DataFrame:
 
     df["Status"] = df["Status (padronizado)"].apply(status_bolinha)
 
-    # dias desde envio até hoje (serve pro acompanhamento em trânsito)
-    hoje = date.today()
+    # dias desde envio (para acompanhar em trânsito)
+    hoje = hoje_local()
     if DT_ENVIO_COL in df.columns:
         def calc_dias_desde_envio(d):
             if d is None or pd.isna(d):
@@ -127,7 +133,7 @@ def mask_busca(df: pd.DataFrame, term: str) -> pd.Series:
 
 # ========= UI =========
 st.title(APP_TITLE)
-st.caption(f"📅 Data da atualização: {date.today().strftime('%d/%m/%Y')}")
+st.caption(f"📅 Data da atualização: {hoje_local().strftime('%d/%m/%Y')}")
 
 top1, top2, top3 = st.columns([1, 1, 2])
 with top1:
@@ -159,24 +165,22 @@ fdf = fdf[mask_busca(fdf, busca)]
 # ========= RESUMO =========
 st.subheader("Resumo")
 
-hoje = date.today()
+hoje = hoje_local()
 total = len(fdf)
 em_transito = int((fdf["Status (padronizado)"] == "Em trânsito").sum())
 recebidos_total = int((fdf["Status (padronizado)"] == "Recebido").sum())
 
-# ✅ recebidos HOJE (contagem pelo dia do recebimento)
+# recebidos HOJE (pelo dia do recebimento)
 recebidos_hoje = 0
 if DT_RECEB_COL in fdf.columns:
     recebidos_hoje = int(((fdf["Status (padronizado)"] == "Recebido") & (fdf[DT_RECEB_COL] == hoje)).sum())
 
 sem_rastreio = int((fdf.get(TRACK_COL, pd.Series([""] * len(fdf))).fillna("").astype(str).str.strip() == "").sum())
 
-# métricas de trânsito
 emt_series = fdf[(fdf["Status (padronizado)"] == "Em trânsito")]["Dias desde envio"].dropna()
 media_dias = float(emt_series.mean()) if len(emt_series) else None
 max_dias = int(emt_series.max()) if len(emt_series) else None
 
-# trajeto (recebidos)
 traj_series = fdf[(fdf["Status (padronizado)"] == "Recebido")]["Dias do trajeto"].dropna()
 media_traj = float(traj_series.mean()) if len(traj_series) else None
 
@@ -188,7 +192,7 @@ c4.metric("📦 Recebidos HOJE", recebidos_hoje)
 c5.metric("Média dias (em trânsito)", "-" if media_dias is None else f"{media_dias:.1f}")
 c6.metric("Média trajeto (recebidos)", "-" if media_traj is None else f"{media_traj:.1f} dias")
 
-# ========= ATENÇÃO 40+ DIAS =========
+# ========= ATENÇÃO =========
 st.subheader("⚠️ Atenção (40+ dias em trânsito)")
 
 atencao = fdf[
@@ -208,17 +212,14 @@ else:
 # ========= TODOS EM TRÂNSITO =========
 st.subheader("📌 Todos os pacotes em trânsito (do mais antigo para o mais novo)")
 
-transito = fdf[
-    (fdf["Status (padronizado)"] == "Em trânsito")
-].copy()
+transito = fdf[(fdf["Status (padronizado)"] == "Em trânsito")].copy()
 
 if len(transito) == 0:
     st.info("Nenhum pacote em trânsito com os filtros atuais.")
 else:
-    # ordena por dias desde envio (maior primeiro). Se não tiver data, vai pro final.
-    if "Dias desde envio" in transito.columns:
-        transito["_ord"] = transito["Dias desde envio"].fillna(-1)
-        transito = transito.sort_values("_ord", ascending=False).drop(columns=["_ord"])
+    # ordena pelo mais antigo (maior dias desde envio)
+    transito["_ord"] = transito["Dias desde envio"].fillna(-1)
+    transito = transito.sort_values("_ord", ascending=False).drop(columns=["_ord"])
 
     cols_trans = [c for c in [PACOTE_COL, TRACK_COL, DT_ENVIO_COL, "Dias desde envio"] if c in transito.columns]
     if "Rastreio (URL)" in transito.columns:
@@ -235,21 +236,6 @@ else:
         )
     else:
         st.dataframe(transito[cols_trans], use_container_width=True)
-
-# ========= RASTREIO =========
-st.subheader("Rastreio (abrir e copiar)")
-
-if TRACK_COL in fdf.columns:
-    codigos = [c for c in fdf[TRACK_COL].dropna().unique().tolist() if str(c).strip()]
-    if codigos:
-        code_sel = st.selectbox("Selecione um código", codigos)
-        link = CORREIOS_URL + str(code_sel)
-        st.markdown(f"➡️ **Abrir rastreio:** [{code_sel}]({link})")
-        st.code(link)
-    else:
-        st.info("Nenhum código disponível com os filtros atuais.")
-else:
-    st.info("Coluna de rastreio não encontrada.")
 
 # ========= LISTA =========
 st.subheader("Lista (clara)")
