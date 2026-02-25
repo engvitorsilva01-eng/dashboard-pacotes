@@ -76,9 +76,10 @@ def carregar_dados() -> pd.DataFrame:
         df["Status (padronizado)"] = df[STATUS_COL].apply(normalizar_status)
     else:
         df["Status (padronizado)"] = "Sem status"
+
     df["Status"] = df["Status (padronizado)"].apply(status_bolinha)
 
-    # dias desde envio (para em trânsito)
+    # dias desde envio até hoje (serve pro acompanhamento em trânsito)
     hoje = date.today()
     if DT_ENVIO_COL in df.columns:
         def calc_dias_desde_envio(d):
@@ -92,7 +93,7 @@ def carregar_dados() -> pd.DataFrame:
     else:
         df["Dias desde envio"] = None
 
-    # ✅ dias do trajeto (APENAS para Recebido)
+    # dias do trajeto (APENAS para Recebido)
     df["Dias do trajeto"] = None
     if (DT_ENVIO_COL in df.columns) and (DT_RECEB_COL in df.columns):
         def calc_trajeto(row):
@@ -107,7 +108,6 @@ def carregar_dados() -> pd.DataFrame:
                 return (receb - envio).days
             except Exception:
                 return None
-
         df["Dias do trajeto"] = df.apply(calc_trajeto, axis=1)
 
     return df
@@ -159,30 +159,37 @@ fdf = fdf[mask_busca(fdf, busca)]
 # ========= RESUMO =========
 st.subheader("Resumo")
 
+hoje = date.today()
 total = len(fdf)
 em_transito = int((fdf["Status (padronizado)"] == "Em trânsito").sum())
-recebidos = int((fdf["Status (padronizado)"] == "Recebido").sum())
+recebidos_total = int((fdf["Status (padronizado)"] == "Recebido").sum())
+
+# ✅ recebidos HOJE (contagem pelo dia do recebimento)
+recebidos_hoje = 0
+if DT_RECEB_COL in fdf.columns:
+    recebidos_hoje = int(((fdf["Status (padronizado)"] == "Recebido") & (fdf[DT_RECEB_COL] == hoje)).sum())
+
 sem_rastreio = int((fdf.get(TRACK_COL, pd.Series([""] * len(fdf))).fillna("").astype(str).str.strip() == "").sum())
 
-# métricas em trânsito
+# métricas de trânsito
 emt_series = fdf[(fdf["Status (padronizado)"] == "Em trânsito")]["Dias desde envio"].dropna()
 media_dias = float(emt_series.mean()) if len(emt_series) else None
 max_dias = int(emt_series.max()) if len(emt_series) else None
 
-# ✅ média do trajeto (recebidos)
+# trajeto (recebidos)
 traj_series = fdf[(fdf["Status (padronizado)"] == "Recebido")]["Dias do trajeto"].dropna()
 media_traj = float(traj_series.mean()) if len(traj_series) else None
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Pacotes registrados", total)
 c2.metric("🟡 Em trânsito", em_transito)
-c3.metric("🟢 Recebidos", recebidos)
-c4.metric("Sem rastreio", sem_rastreio)
+c3.metric("🟢 Recebidos (total)", recebidos_total)
+c4.metric("📦 Recebidos HOJE", recebidos_hoje)
 c5.metric("Média dias (em trânsito)", "-" if media_dias is None else f"{media_dias:.1f}")
-c6.metric("Média do trajeto (recebidos)", "-" if media_traj is None else f"{media_traj:.1f} dias")
+c6.metric("Média trajeto (recebidos)", "-" if media_traj is None else f"{media_traj:.1f} dias")
 
 # ========= ATENÇÃO 40+ DIAS =========
-st.subheader("⚠️ Atenção")
+st.subheader("⚠️ Atenção (40+ dias em trânsito)")
 
 atencao = fdf[
     (fdf["Status (padronizado)"] == "Em trânsito")
@@ -198,30 +205,36 @@ else:
     atencao = atencao.sort_values("Dias desde envio", ascending=False)
     st.dataframe(atencao[cols_alerta], use_container_width=True)
 
-# ========= TOP 5 MAIS ANTIGOS EM TRÂNSITO =========
-st.subheader("Top 5 mais antigos em trânsito")
+# ========= TODOS EM TRÂNSITO =========
+st.subheader("📌 Todos os pacotes em trânsito (do mais antigo para o mais novo)")
 
-top5 = fdf[
+transito = fdf[
     (fdf["Status (padronizado)"] == "Em trânsito")
-    & (fdf["Dias desde envio"].notna())
 ].copy()
 
-if len(top5) == 0:
-    st.info("Nenhum pacote em trânsito com data de envio preenchida.")
+if len(transito) == 0:
+    st.info("Nenhum pacote em trânsito com os filtros atuais.")
 else:
-    top5 = top5.sort_values("Dias desde envio", ascending=False).head(5)
-    cols_top = [c for c in [PACOTE_COL, TRACK_COL, DT_ENVIO_COL, "Dias desde envio"] if c in top5.columns]
-    if "Rastreio (URL)" in top5.columns:
-        top5["Rastrear"] = top5["Rastreio (URL)"]
-        cols_top.append("Rastrear")
+    # ordena por dias desde envio (maior primeiro). Se não tiver data, vai pro final.
+    if "Dias desde envio" in transito.columns:
+        transito["_ord"] = transito["Dias desde envio"].fillna(-1)
+        transito = transito.sort_values("_ord", ascending=False).drop(columns=["_ord"])
 
-    if hasattr(st, "data_editor") and hasattr(st, "column_config") and hasattr(st.column_config, "LinkColumn"):
-        cfg = {}
-        if "Rastrear" in top5.columns:
-            cfg["Rastrear"] = st.column_config.LinkColumn("Rastrear", display_text="Abrir")
-        st.data_editor(top5[cols_top], use_container_width=True, hide_index=True, disabled=True, column_config=cfg)
+    cols_trans = [c for c in [PACOTE_COL, TRACK_COL, DT_ENVIO_COL, "Dias desde envio"] if c in transito.columns]
+    if "Rastreio (URL)" in transito.columns:
+        transito["Rastrear"] = transito["Rastreio (URL)"]
+        cols_trans.append("Rastrear")
+
+    if hasattr(st, "data_editor") and hasattr(st, "column_config") and hasattr(st.column_config, "LinkColumn") and "Rastrear" in transito.columns:
+        st.data_editor(
+            transito[cols_trans],
+            use_container_width=True,
+            hide_index=True,
+            disabled=True,
+            column_config={"Rastrear": st.column_config.LinkColumn("Rastrear (Correios)", display_text="Abrir")},
+        )
     else:
-        st.dataframe(top5[cols_top], use_container_width=True)
+        st.dataframe(transito[cols_trans], use_container_width=True)
 
 # ========= RASTREIO =========
 st.subheader("Rastreio (abrir e copiar)")
@@ -253,11 +266,11 @@ if mostrar_link and "Rastreio (URL)" in fdf.columns:
     view["Rastrear"] = fdf["Rastreio (URL)"]
     if hasattr(st, "data_editor") and hasattr(st, "column_config") and hasattr(st.column_config, "LinkColumn"):
         st.data_editor(
-            view.assign(Rastrear=view["Rastrear"]),
+            view,
             use_container_width=True,
             hide_index=True,
             disabled=True,
-            column_config={"Rastrear": st.column_config.LinkColumn("Rastrear", display_text="Abrir")},
+            column_config={"Rastrear": st.column_config.LinkColumn("Rastrear (Correios)", display_text="Abrir")},
         )
     else:
         st.dataframe(view, use_container_width=True)
