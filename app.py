@@ -1,442 +1,379 @@
-import re
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
-
-import pandas as pd
 import streamlit as st
-
-# =======================
-# CONFIG GERAL
-# =======================
-APP_TITLE = "📦 Painel de Pacotes"
-BRAND_NAME = "MVSPORTSAC"
-BRAND_HANDLE = "mvsportsac"
-LOGO_PATH = "logo.png"  # opcional (se não existir, não quebra)
-
-FILE_PATH = "CONTROLE_LOGISTICO_FORMATADO_COM_FORMULAS.xlsx"
-SHEET_PACOTES = "PACOTES"
-SHEET_ITENS = "ITENS"
-
-# nomes esperados (iguais aos da sua planilha)
-TRACK_COL = "Código de Rastreio"
-STATUS_COL = "Status"
-PACOTE_COL = "Pacote"
-DT_PEDIDO_COL = "Data do pedido"
-DT_ENVIO_COL = "Data do envio"
-DT_RECEB_COL = "Data de recebimento"
-
-# aba ITENS (esperado)
-IT_PACOTE_COL = "Pacote"
-IT_CAMISA_COL = "Camisa"
-IT_TAM_COL = "Tamanho"
-IT_QTD_COL = "Qtd"
-IT_CLIENTE_COL = "Cliente"
-
-CORREIOS_URL = "https://rastreamento.correios.com.br/app/index.php?objetos="
-
-CACHE_TTL = 20
-ALERTA_DIAS = 40
-TZ = ZoneInfo("America/Fortaleza")
-
-
-# =======================
-# PAGE CONFIG (anti-erro)
-# =======================
-def _set_page_config_safe():
-    try:
-        st.set_page_config(
-            page_title=f"{APP_TITLE} - {BRAND_NAME}",
-            layout="wide",
-            page_icon=LOGO_PATH,
-        )
-    except Exception:
-        st.set_page_config(
-            page_title=f"{APP_TITLE} - {BRAND_NAME}",
-            layout="wide",
-            page_icon="📦",
-        )
-
-
-_set_page_config_safe()
-
-
-# =======================
-# FUNÇÕES
-# =======================
-def hoje_local() -> date:
-    return datetime.now(TZ).date()
-
-
-def limpar_codigo(valor) -> str:
-    if pd.isna(valor):
-        return ""
-    s = str(valor).strip().upper()
-    s = re.sub(r"[^A-Z0-9]", "", s)
-    return s
-
-
-def normalizar_status(s):
-    s = "" if pd.isna(s) else str(s).strip().lower()
-    if "receb" in s or "entreg" in s:
-        return "Recebido"
-    if "trâns" in s or "transit" in s or "transito" in s:
-        return "Em trânsito"
-    if s:
-        return str(s).strip().title()
-    return "Sem status"
-
-
-def status_bolinha(stt: str) -> str:
-    if stt == "Em trânsito":
-        return "🟡 Em trânsito"
-    if stt == "Recebido":
-        return "🟢 Recebido"
-    if stt == "Sem status":
-        return "⚪ Sem status"
-    return f"🔵 {stt}"
-
-
-def mask_busca_texto(df: pd.DataFrame, term: str) -> pd.Series:
-    term = (term or "").strip().lower()
-    if not term:
-        return pd.Series([True] * len(df), index=df.index)
-
-    m = pd.Series(False, index=df.index)
-    for col in df.columns:
-        # tenta buscar em tudo (inclusive números/datas convertidos pra str)
-        try:
-            m = m | df[col].fillna("").astype(str).str.lower().str.contains(term, regex=False)
-        except Exception:
-            pass
-    return m
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def carregar_pacotes() -> pd.DataFrame:
-    try:
-        df = pd.read_excel(FILE_PATH, sheet_name=SHEET_PACOTES, engine="openpyxl")
-    except Exception as e:
-        st.error("Não consegui abrir a planilha (.xlsx) / aba PACOTES.")
-        st.code(str(e))
-        st.info(f"Confira se o arquivo existe na raiz do repo com o nome: {FILE_PATH}")
-        st.stop()
-
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # datas SEM horas
-    for c in [DT_PEDIDO_COL, DT_ENVIO_COL, DT_RECEB_COL]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
-
-    # rastreio
-    if TRACK_COL in df.columns:
-        df[TRACK_COL] = df[TRACK_COL].apply(limpar_codigo)
-        df["Rastreio (URL)"] = df[TRACK_COL].apply(lambda x: CORREIOS_URL + x if x else "")
-    else:
-        df[TRACK_COL] = ""
-        df["Rastreio (URL)"] = ""
-
-    # status padronizado
-    if STATUS_COL in df.columns:
-        df["Status (padronizado)"] = df[STATUS_COL].apply(normalizar_status)
-    else:
-        df["Status (padronizado)"] = "Sem status"
-
-    df["Status"] = df["Status (padronizado)"].apply(status_bolinha)
-
-    # dias desde envio (para trânsito)
-    hoje = hoje_local()
-    if DT_ENVIO_COL in df.columns:
-        def calc_dias_desde_envio(d):
-            if d is None or pd.isna(d):
-                return None
-            try:
-                return (hoje - d).days
-            except Exception:
-                return None
-
-        df["Dias desde envio"] = df[DT_ENVIO_COL].apply(calc_dias_desde_envio)
-    else:
-        df["Dias desde envio"] = None
-
-    # dias do trajeto (somente recebidos)
-    df["Dias do trajeto"] = None
-    if (DT_ENVIO_COL in df.columns) and (DT_RECEB_COL in df.columns):
-        def calc_trajeto(row):
-            if row.get("Status (padronizado)", "") != "Recebido":
-                return None
-            envio = row.get(DT_ENVIO_COL, None)
-            receb = row.get(DT_RECEB_COL, None)
-            if envio is None or pd.isna(envio) or receb is None or pd.isna(receb):
-                return None
-            try:
-                return (receb - envio).days
-            except Exception:
-                return None
-
-        df["Dias do trajeto"] = df.apply(calc_trajeto, axis=1)
-
-    return df
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def carregar_itens() -> pd.DataFrame:
-    # não quebra se não existir a aba
-    try:
-        it = pd.read_excel(FILE_PATH, sheet_name=SHEET_ITENS, engine="openpyxl")
-        it.columns = [str(c).strip() for c in it.columns]
-    except Exception:
-        it = pd.DataFrame(columns=[IT_PACOTE_COL, IT_CAMISA_COL, IT_TAM_COL, IT_QTD_COL, IT_CLIENTE_COL])
-
-    # garante colunas mínimas
-    for c in [IT_PACOTE_COL, IT_CAMISA_COL, IT_TAM_COL, IT_QTD_COL, IT_CLIENTE_COL]:
-        if c not in it.columns:
-            it[c] = ""
-
-    # normaliza tipos
-    it[IT_PACOTE_COL] = it[IT_PACOTE_COL].fillna("").astype(str).str.strip()
-    it[IT_CAMISA_COL] = it[IT_CAMISA_COL].fillna("").astype(str).str.strip()
-    it[IT_TAM_COL] = it[IT_TAM_COL].fillna("").astype(str).str.strip()
-    it[IT_CLIENTE_COL] = it[IT_CLIENTE_COL].fillna("").astype(str).str.strip()
-
-    # Qtd numérica
-    it[IT_QTD_COL] = pd.to_numeric(it[IT_QTD_COL], errors="coerce").fillna(0).astype(int)
-
-    # remove linhas vazias (sem pacote e sem camisa)
-    it = it[~((it[IT_PACOTE_COL] == "") & (it[IT_CAMISA_COL] == ""))].copy()
-
-    return it
-
-
-def limpar_cache():
-    carregar_pacotes.clear()
-    carregar_itens.clear()
-
-
-def mostrar_logo_titulo():
-    col_logo, col_title = st.columns([1, 6], vertical_alignment="center")
-    with col_logo:
-        try:
-            st.image(LOGO_PATH, width=120)
-        except Exception:
-            st.write("")
-    with col_title:
-        st.title(APP_TITLE)
-        st.caption(f"📅 Data da atualização: {hoje_local().strftime('%d/%m/%Y')}")
-
-
-# =======================
-# UI
-# =======================
-mostrar_logo_titulo()
-
-top1, top2, top3 = st.columns([1, 1, 2])
-with top1:
-    if st.button("🔄 Atualizar agora"):
-        limpar_cache()
-        st.rerun()
-with top2:
-    st.caption(f"Atualiza automaticamente: ~{CACHE_TTL}s")
-with top3:
-    st.caption("Atualize como sempre: suba o .xlsx no GitHub.")
-
-
-df = carregar_pacotes()
-itens = carregar_itens()
-
-# =======================
-# FILTROS
-# =======================
-st.sidebar.header("Filtros")
-
-status_opts = sorted(df["Status (padronizado)"].dropna().unique().tolist())
-status_sel = st.sidebar.multiselect("Status", options=status_opts, default=status_opts)
-
-somente_sem_rastreio = st.sidebar.checkbox("Somente sem rastreio", value=False)
-busca_geral = st.sidebar.text_input("Buscar (geral)", "")
-
-fdf = df.copy()
-fdf = fdf[fdf["Status (padronizado)"].isin(status_sel)]
-
-if somente_sem_rastreio:
-    fdf = fdf[fdf[TRACK_COL].fillna("").astype(str).str.strip() == ""]
-
-fdf = fdf[mask_busca_texto(fdf, busca_geral)]
-
-
-# =======================
-# RESUMO
-# =======================
-st.subheader("Resumo")
-
-hoje = hoje_local()
-total = len(fdf)
-em_transito = int((fdf["Status (padronizado)"] == "Em trânsito").sum())
-recebidos_total = int((fdf["Status (padronizado)"] == "Recebido").sum())
-
-recebidos_hoje = 0
-if DT_RECEB_COL in fdf.columns:
-    recebidos_hoje = int(((fdf["Status (padronizado)"] == "Recebido") & (fdf[DT_RECEB_COL] == hoje)).sum())
-
-sem_rastreio = int((fdf[TRACK_COL].fillna("").astype(str).str.strip() == "").sum())
-
-emt = fdf[(fdf["Status (padronizado)"] == "Em trânsito")]["Dias desde envio"].dropna()
-media_dias_trans = float(emt.mean()) if len(emt) else None
-max_dias_trans = int(emt.max()) if len(emt) else None
-
-traj = fdf[(fdf["Status (padronizado)"] == "Recebido")]["Dias do trajeto"].dropna()
-media_traj = float(traj.mean()) if len(traj) else None
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Pacotes registrados", total)
-c2.metric("🟡 Em trânsito", em_transito)
-c3.metric("🟢 Recebidos (total)", recebidos_total)
-c4.metric("📦 Recebidos HOJE", recebidos_hoje)
-c5.metric("Média dias (em trânsito)", "-" if media_dias_trans is None else f"{media_dias_trans:.1f}")
-c6.metric("Maior tempo (em trânsito)", "-" if max_dias_trans is None else f"{max_dias_trans} dias")
-
-st.caption(f"Sem rastreio: {sem_rastreio}")
-
-
-# =======================
-# ATENÇÃO 40+ DIAS
-# =======================
-st.subheader("⚠️ Atenção (40+ dias em trânsito)")
-
-atencao = fdf[
-    (fdf["Status (padronizado)"] == "Em trânsito")
-    & (fdf["Dias desde envio"].notna())
-    & (fdf["Dias desde envio"] >= ALERTA_DIAS)
-].copy()
-
-if len(atencao) == 0:
-    st.success(f"Nenhum pacote em trânsito com {ALERTA_DIAS}+ dias ✅")
-else:
-    st.error(f"⚠️ ATENÇÃO: {len(atencao)} pacote(s) com {ALERTA_DIAS}+ dias em trânsito!")
-    cols_alerta = [c for c in [PACOTE_COL, TRACK_COL, DT_ENVIO_COL, "Dias desde envio"] if c in atencao.columns]
-    atencao = atencao.sort_values("Dias desde envio", ascending=False)
-    st.dataframe(atencao[cols_alerta], use_container_width=True)
-
-
-# =======================
-# TODOS EM TRÂNSITO
-# =======================
-st.subheader("📌 Todos os pacotes em trânsito (mais antigos primeiro)")
-
-transito = fdf[(fdf["Status (padronizado)"] == "Em trânsito")].copy()
-
-if len(transito) == 0:
-    st.info("Nenhum pacote em trânsito com os filtros atuais.")
-else:
-    transito["_ord"] = transito["Dias desde envio"].fillna(-1)
-    transito = transito.sort_values("_ord", ascending=False).drop(columns=["_ord"])
-
-    cols_trans = [c for c in [PACOTE_COL, TRACK_COL, DT_ENVIO_COL, "Dias desde envio"] if c in transito.columns]
-    transito["Rastrear"] = transito.get("Rastreio (URL)", "")
-
-    # LinkColumn (se disponível)
-    if hasattr(st, "data_editor") and hasattr(st, "column_config") and hasattr(st.column_config, "LinkColumn"):
-        st.data_editor(
-            transito[cols_trans + (["Rastrear"] if "Rastrear" in transito.columns else [])],
-            use_container_width=True,
-            hide_index=True,
-            disabled=True,
-            column_config={
-                "Rastrear": st.column_config.LinkColumn("Rastrear", display_text="Abrir")
-            } if "Rastrear" in transito.columns else None,
-        )
-    else:
-        st.dataframe(transito[cols_trans], use_container_width=True)
-
-
-# =======================
-# BUSCAR POR CÓDIGO + MOSTRAR ITENS
-# =======================
-st.subheader("🔎 Buscar por código de rastreio (e ver camisas do pacote)")
-
-todos_codigos = df[TRACK_COL].dropna().astype(str).str.strip().tolist()
-todos_codigos = sorted(list({c for c in todos_codigos if c}))
-
-colA, colB = st.columns([2, 3])
-with colA:
-    code_digitado = st.text_input("Digite o código", "").strip().upper()
-with colB:
-    code_sel = st.selectbox("Ou selecione na lista", options=[""] + todos_codigos, index=0)
-
-code_final = code_digitado if code_digitado else code_sel
-
-if code_final:
-    code_final = re.sub(r"[^A-Z0-9]", "", code_final)
-    link = CORREIOS_URL + code_final
-
-    st.markdown(f"➡️ **Abrir rastreio:** [{code_final}]({link})")
-    st.code(link)
-
-    achados = df[df[TRACK_COL].fillna("").astype(str).str.upper() == code_final].copy()
-    if len(achados) == 0:
-        # tenta contains só pra não falhar se tiver espaço etc
-        achados = df[df[TRACK_COL].fillna("").astype(str).str.upper().str.contains(code_final, regex=False)].copy()
-
-    if len(achados) == 0:
-        st.info("Código não encontrado na planilha.")
-    else:
-        cols_show = [c for c in [PACOTE_COL, "Status", DT_ENVIO_COL, DT_RECEB_COL, "Dias desde envio", "Dias do trajeto"] if c in achados.columns]
-        st.dataframe(achados[cols_show], use_container_width=True)
-
-        # pega o pacote do primeiro resultado
-        if PACOTE_COL in achados.columns:
-            pacote_encontrado = str(achados[PACOTE_COL].dropna().astype(str).iloc[0]).strip()
-            st.markdown("### 🧾 Camisas dentro deste pacote")
-
-            if pacote_encontrado == "":
-                st.info("Este código não tem 'Pacote' preenchido na aba PACOTES.")
-            else:
-                itens_pacote = itens[itens[IT_PACOTE_COL].astype(str).str.strip() == pacote_encontrado].copy()
-
-                if len(itens_pacote) == 0:
-                    st.info("Nenhuma camisa cadastrada para este pacote na aba ITENS.")
-                else:
-                    cols_it = [c for c in [IT_CAMISA_COL, IT_TAM_COL, IT_QTD_COL, IT_CLIENTE_COL] if c in itens_pacote.columns]
-                    st.dataframe(itens_pacote[cols_it], use_container_width=True)
-
-                    total_qtd = int(itens_pacote[IT_QTD_COL].sum()) if IT_QTD_COL in itens_pacote.columns else 0
-                    st.caption(f"Total de peças neste pacote: {total_qtd}")
-
-
-# =======================
-# LISTA GERAL
-# =======================
-st.subheader("Lista (clara)")
-
-cols_principais = [c for c in [PACOTE_COL, "Status", TRACK_COL, DT_PEDIDO_COL, DT_ENVIO_COL, "Dias desde envio", DT_RECEB_COL, "Dias do trajeto"] if c in fdf.columns]
-view = fdf[cols_principais].copy() if cols_principais else fdf.copy()
-
-mostrar_link = st.checkbox("Mostrar link do rastreio na lista completa", value=False)
-if mostrar_link:
-    view["Rastrear"] = fdf.get("Rastreio (URL)", "")
-    if hasattr(st, "data_editor") and hasattr(st, "column_config") and hasattr(st.column_config, "LinkColumn"):
-        st.data_editor(
-            view,
-            use_container_width=True,
-            hide_index=True,
-            disabled=True,
-            column_config={"Rastrear": st.column_config.LinkColumn("Rastrear", display_text="Abrir")},
-        )
-    else:
-        st.dataframe(view, use_container_width=True)
-else:
-    st.dataframe(view, use_container_width=True)
-
-
-# =======================
-# EXPORT + RODAPÉ
-# =======================
-st.download_button(
-    "⬇️ Baixar CSV (com filtros)",
-    data=fdf.to_csv(index=False).encode("utf-8"),
-    file_name="pacotes_filtrados.csv",
-    mime="text/csv",
+import pandas as pd
+import numpy as np
+import unicodedata
+from datetime import date
+
+# =========================
+# Config
+# =========================
+st.set_page_config(page_title="Painel de Pacotes", page_icon="📦", layout="wide")
+
+ARQUIVO_EXCEL = "CONTROLE_LOGISTICO_FORMATADO_COM_FORMULAS.xlsx"
+DIAS_ALERTA = 40  # alerta a partir de 40 dias
+
+# =========================
+# Estilo (objetivo / público)
+# =========================
+st.markdown(
+    """
+<style>
+.block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1200px; }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 900px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { .kpi-grid { grid-template-columns: 1fr; } }
+
+.kpi-card {
+  border: 1px solid rgba(250,250,250,0.12);
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: rgba(255,255,255,0.03);
+}
+.kpi-title { font-size: 0.85rem; opacity: 0.75; margin-bottom: 4px; }
+.kpi-value { font-size: 1.6rem; font-weight: 750; line-height: 1.2; }
+
+.row-card {
+  border: 1px solid rgba(250,250,250,0.12);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.row-top { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.badge {
+  padding: 4px 10px; border-radius: 999px; font-size: 0.82rem;
+  border: 1px solid rgba(250,250,250,0.18);
+  opacity: 0.95;
+  white-space: nowrap;
+}
+.badge-warn { border-color: rgba(255, 180, 60, 0.65); }
+.small { font-size: 0.88rem; opacity: 0.78; margin-top: 6px; }
+hr { opacity: 0.15; }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
-st.markdown("---")
-st.caption(f"© {BRAND_NAME} • {BRAND_HANDLE}")
+# =========================
+# Helpers
+# =========================
+def _norm_text(s: str) -> str:
+    """Normaliza texto: lower, sem acento, sem espaços duplos."""
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = " ".join(s.split())
+    return s
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [ _norm_text(c).replace("/", " ").replace("-", " ") for c in df.columns ]
+    return df
+
+def pick_sheet(xls: pd.ExcelFile) -> str:
+    """Escolhe uma aba provável. Se falhar, usa a primeira."""
+    priority = [
+        "controle", "logistico", "logistica", "base", "dados", "painel", "dashboard",
+        "planilha", "principal"
+    ]
+    names = xls.sheet_names
+    names_norm = [ _norm_text(n) for n in names ]
+
+    for key in priority:
+        for real, norm in zip(names, names_norm):
+            if key in norm:
+                return real
+    return names[0]
+
+def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """Acha coluna por match exato (normalizado) ou por 'contem'."""
+    cols = list(df.columns)
+    for cand in candidates:
+        c = _norm_text(cand)
+        if c in cols:
+            return c
+    for col in cols:
+        for cand in candidates:
+            if _norm_text(cand) in col:
+                return col
+    return None
+
+def to_date_series(series: pd.Series) -> pd.Series:
+    """Converte para date (sem quebrar)."""
+    s = pd.to_datetime(series, errors="coerce", dayfirst=True)
+    return s.dt.date
+
+def safe_str(x) -> str:
+    if pd.isna(x) or x is None:
+        return ""
+    return str(x).strip()
+
+def status_publico(row: pd.Series, col_status: str | None, col_receb: str | None) -> str:
+    """
+    Regras:
+    - Se tem data de recebimento => RECEBIDO
+    - Senão, se status textual indicar recebido/entregue => RECEBIDO
+    - Senão => EM TRANSITO
+    """
+    if col_receb and pd.notna(row.get(col_receb)):
+        return "RECEBIDO"
+
+    if col_status:
+        v = _norm_text(row.get(col_status))
+        if any(k in v for k in ["recebid", "entreg", "finaliz", "conclu", "chegou"]):
+            return "RECEBIDO"
+
+    return "EM TRANSITO"
+
+def calc_dias_espera(row: pd.Series, col_envio: str | None, hoje: date) -> float:
+    if row.get("status_publico") != "EM TRANSITO":
+        return np.nan
+    if not col_envio:
+        return np.nan
+    d0 = row.get(col_envio)
+    if pd.isna(d0) or d0 is None:
+        return np.nan
+    try:
+        return float((hoje - d0).days)
+    except Exception:
+        return np.nan
+
+def kpi_card(title: str, value: str):
+    st.markdown(
+        f"""
+<div class="kpi-card">
+  <div class="kpi-title">{title}</div>
+  <div class="kpi-value">{value}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+# =========================
+# Carregamento do Excel (robusto)
+# =========================
+@st.cache_data(show_spinner=False)
+def load_excel(path: str):
+    xls = pd.ExcelFile(path)
+    sheet = pick_sheet(xls)
+    df = pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
+    df = normalize_columns(df)
+
+    # remove linhas totalmente vazias
+    df = df.dropna(how="all")
+
+    return df, sheet, xls.sheet_names
+
+st.title("📦 Painel Público de Pacotes")
+hoje = date.today()
+st.caption(f"📅 Atualizado em: {hoje.strftime('%d/%m/%Y')}")
+
+try:
+    df, sheet_used, all_sheets = load_excel(ARQUIVO_EXCEL)
+except FileNotFoundError:
+    st.error(
+        f"Arquivo **{ARQUIVO_EXCEL}** não foi encontrado na pasta do app.\n\n"
+        "✅ Coloque a planilha na **raiz do repositório** (mesma pasta do app.py)."
+    )
+    st.stop()
+except Exception as e:
+    st.error(f"Não consegui abrir a planilha. Erro: {e}")
+    st.stop()
+
+# =========================
+# Detectar colunas
+# =========================
+col_codigo = pick_col(df, ["codigo", "código", "tracking", "rastreamento", "awb", "id", "pedido", "cod"])
+col_status = pick_col(df, ["status", "situacao", "situação"])
+col_envio  = pick_col(df, ["data envio", "data de envio", "envio", "postagem", "data postagem", "data de postagem", "despacho"])
+col_receb  = pick_col(df, ["data recebimento", "data de recebimento", "recebido em", "entregue em", "data entrega", "data de entrega", "entrega"])
+
+# Se não existir coluna de código, cria uma
+if not col_codigo:
+    df["codigo"] = np.arange(1, len(df) + 1).astype(str)
+    col_codigo = "codigo"
+
+# Garantir código como texto
+df[col_codigo] = df[col_codigo].astype(str).str.strip()
+
+# Converter datas (se existirem)
+if col_envio:
+    df[col_envio] = to_date_series(df[col_envio])
+if col_receb:
+    df[col_receb] = to_date_series(df[col_receb])
+
+# Status público + dias espera
+df["status_publico"] = df.apply(lambda r: status_publico(r, col_status, col_receb), axis=1)
+df["dias_em_espera"] = df.apply(lambda r: calc_dias_espera(r, col_envio, hoje), axis=1)
+
+# =========================
+# KPIs
+# =========================
+total = int(len(df))
+em_transito = int((df["status_publico"] == "EM TRANSITO").sum())
+recebidos = int((df["status_publico"] == "RECEBIDO").sum())
+
+espera = df.loc[df["status_publico"] == "EM TRANSITO", "dias_em_espera"].dropna()
+media_espera = int(round(float(espera.mean()))) if len(espera) else 0
+max_espera = int(float(espera.max())) if len(espera) else 0
+
+st.markdown('<div class="kpi-grid">', unsafe_allow_html=True)
+c1, c2, c3, c4 = st.columns(4)
+with c1: kpi_card("📦 Total", f"{total}")
+with c2: kpi_card("🚚 Em trânsito", f"{em_transito}")
+with c3: kpi_card("✅ Recebidos", f"{recebidos}")
+with c4: kpi_card("⏳ Espera (média / máximo)", f"{media_espera}d / {max_espera}d")
+st.markdown("</div>", unsafe_allow_html=True)
+
+# =========================
+# Filtros (simples)
+# =========================
+st.divider()
+left, right = st.columns([2, 1])
+
+with left:
+    busca = st.text_input("🔎 Buscar por código (ou parte do código)", placeholder="Ex: LB123, BR, 2026...")
+with right:
+    filtro_status = st.selectbox("Filtrar", ["Todos", "Em trânsito", "Recebidos"], index=0)
+
+f = df.copy()
+
+if busca.strip():
+    f = f[f[col_codigo].astype(str).str.contains(busca.strip(), case=False, na=False)]
+
+if filtro_status == "Em trânsito":
+    f = f[f["status_publico"] == "EM TRANSITO"]
+elif filtro_status == "Recebidos":
+    f = f[f["status_publico"] == "RECEBIDO"]
+
+# =========================
+# Seção principal: Em trânsito (cards)
+# =========================
+st.divider()
+st.subheader("⏳ Em trânsito (mais antigos primeiro)")
+st.caption("Aqui aparece o que importa: **quantos dias o pacote está em espera**.")
+
+em_df = df[df["status_publico"] == "EM TRANSITO"].copy()
+em_df = em_df.sort_values(by="dias_em_espera", ascending=False)
+
+limite = st.slider("Quantidade para mostrar", min_value=10, max_value=120, value=30, step=10)
+
+if em_df.empty:
+    st.info("Nenhum pacote em trânsito encontrado.")
+else:
+    for _, r in em_df.head(limite).iterrows():
+        codigo = safe_str(r.get(col_codigo))
+        dias = r.get("dias_em_espera")
+        dias_txt = "—" if pd.isna(dias) else f"{int(dias)} dias"
+
+        envio_txt = ""
+        if col_envio and pd.notna(r.get(col_envio)):
+            d = r.get(col_envio)
+            envio_txt = d.strftime("%d/%m/%Y") if hasattr(d, "strftime") else str(d)
+
+        warn = (not pd.isna(dias)) and int(dias) >= DIAS_ALERTA
+        badge_class = "badge badge-warn" if warn else "badge"
+        badge_text = f"⚠️ ATENÇÃO ({DIAS_ALERTA}+ dias)" if warn else "Em trânsito"
+
+        extra = f" • 📮 Postado em: <b>{envio_txt}</b>" if envio_txt else ""
+
+        st.markdown(
+            f"""
+<div class="row-card">
+  <div class="row-top">
+    <div><b>📦 {codigo}</b></div>
+    <div class="{badge_class}">🚚 {badge_text}</div>
+  </div>
+  <div class="small">⏳ Espera: <b>{dias_txt}</b>{extra}</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+# =========================
+# Resultado da busca (objetivo, sem tabelão)
+# =========================
+st.divider()
+st.subheader("📌 Resultado da busca / filtro")
+
+if f.empty:
+    st.info("Nada para mostrar com esse filtro/busca.")
+else:
+    # Mostra em cards (mais amigável pro público)
+    # Limita para não virar infinito
+    max_cards = 40
+    count = 0
+
+    for _, r in f.iterrows():
+        if count >= max_cards:
+            st.caption(f"Mostrando os primeiros {max_cards}. Refine a busca para ver menos.")
+            break
+
+        codigo = safe_str(r.get(col_codigo))
+        status = safe_str(r.get("status_publico"))
+
+        if status == "RECEBIDO":
+            rec_txt = "—"
+            if col_receb and pd.notna(r.get(col_receb)):
+                d = r.get(col_receb)
+                rec_txt = d.strftime("%d/%m/%Y") if hasattr(d, "strftime") else str(d)
+
+            st.markdown(
+                f"""
+<div class="row-card">
+  <div class="row-top">
+    <div><b>📦 {codigo}</b></div>
+    <div class="badge">✅ Recebido</div>
+  </div>
+  <div class="small">📅 Data de recebimento: <b>{rec_txt}</b></div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+        else:
+            dias = r.get("dias_em_espera")
+            dias_txt = "—" if pd.isna(dias) else f"{int(dias)} dias"
+            warn = (not pd.isna(dias)) and int(dias) >= DIAS_ALERTA
+            badge_class = "badge badge-warn" if warn else "badge"
+            badge_text = f"⚠️ ATENÇÃO ({DIAS_ALERTA}+ dias)" if warn else "Em trânsito"
+
+            st.markdown(
+                f"""
+<div class="row-card">
+  <div class="row-top">
+    <div><b>📦 {codigo}</b></div>
+    <div class="{badge_class}">🚚 {badge_text}</div>
+  </div>
+  <div class="small">⏳ Espera: <b>{dias_txt}</b></div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+        count += 1
+
+# =========================
+# Diagnóstico (para você, fechado por padrão)
+# =========================
+with st.expander("⚙️ Diagnóstico (para manutenção)", expanded=False):
+    st.write("**Arquivo:**", ARQUIVO_EXCEL)
+    st.write("**Aba usada:**", sheet_used)
+    st.write("**Abas encontradas:**", all_sheets)
+    st.write("**Colunas detectadas:**")
+    st.json(
+        {
+            "codigo": col_codigo,
+            "status (planilha)": col_status,
+            "data envio": col_envio,
+            "data recebimento": col_receb,
+        }
+    )
+
+    faltando = []
+    if not col_envio:
+        faltando.append("Data de envio/postagem (sem isso não calcula DIAS EM ESPERA).")
+    if faltando:
+        st.warning("Campos não encontrados:\n- " + "\n- ".join(faltando))
