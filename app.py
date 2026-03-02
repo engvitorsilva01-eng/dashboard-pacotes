@@ -11,8 +11,8 @@ ARQUIVO_EXCEL = "CONTROLE_LOGISTICO_FORMATADO_COM_FORMULAS.xlsx"
 SHEET_PACOTES = "PACOTES"
 SHEET_ITENS = "ITENS"
 
-TZ = ZoneInfo("America/Fortaleza")   # garante data certa no seu fuso
-DIAS_ALERTA = 40                     # alerta após X dias
+TZ = ZoneInfo("America/Fortaleza")   # data certa no seu fuso
+DIAS_ALERTA = 40
 MAX_RESULTADOS_BUSCA = 20
 
 st.set_page_config(page_title="Painel de Rastreamento", page_icon="📦", layout="centered")
@@ -69,7 +69,6 @@ hr{opacity:.12;}
 # HELPERS
 # =========================================================
 def safe_str(x) -> str:
-    """Converte para texto sem 'nan' e sem espaços."""
     if x is None:
         return ""
     if isinstance(x, float) and np.isnan(x):
@@ -103,28 +102,18 @@ def kpi_card(title: str, value: str):
 
 
 def prepare_pacotes(pacotes: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepara:
-      - Status público (Em trânsito / Recebido)
-      - Dias em espera (prioriza 'Dias desde envio'; se faltar, usa 'Dias desde pedido')
-    """
     df = pacotes.copy()
 
     # Status público
     df["Status público"] = "Em trânsito"
-
-    # 1) Se tem Data de recebimento => Recebido
     df.loc[pd.notna(df["Data de recebimento"]), "Status público"] = "Recebido"
 
-    # 2) Se Status textual começa com "receb" ou contém "entreg" => Recebido
     status_txt = df["Status"].astype(str).str.lower()
     df.loc[status_txt.str.startswith("receb"), "Status público"] = "Recebido"
     df.loc[status_txt.str.contains("entreg", na=False), "Status público"] = "Recebido"
 
-    # Dias em espera
+    # Dias em espera (usa colunas da planilha, se existirem)
     df["Dias em espera"] = np.nan
-
-    # Usa colunas prontas se existirem
     if "Dias desde envio" in df.columns:
         df["Dias em espera"] = pd.to_numeric(df["Dias desde envio"], errors="coerce")
 
@@ -132,17 +121,14 @@ def prepare_pacotes(pacotes: pd.DataFrame) -> pd.DataFrame:
         mask_na = df["Dias em espera"].isna()
         df.loc[mask_na, "Dias em espera"] = pd.to_numeric(df.loc[mask_na, "Dias desde pedido"], errors="coerce")
 
-    # Para recebidos não faz sentido mostrar dias em espera
     df.loc[df["Status público"] == "Recebido", "Dias em espera"] = np.nan
-
     return df
 
 
 def itens_do_pacote(itens: pd.DataFrame, pacote: str, codigo: str) -> pd.DataFrame:
-    """Agrupa Camisa + Tamanho e soma Qtd."""
     it = itens[
-        (itens["Pacote"].astype(str) == str(pacote)) |
-        (itens["Código de Rastreio"].astype(str) == str(codigo))
+        (itens["Pacote"].astype(str) == str(pacote))
+        | (itens["Código de Rastreio"].astype(str) == str(codigo))
     ].copy()
 
     if it.empty:
@@ -160,7 +146,6 @@ def itens_do_pacote(itens: pd.DataFrame, pacote: str, codigo: str) -> pd.DataFra
 
 
 def render_card(pacote, codigo, status, dias_espera, data_envio, data_receb):
-    """Mostra card + botão Correios."""
     status = safe_str(status)
 
     if status == "Recebido":
@@ -201,14 +186,23 @@ def render_card(pacote, codigo, status, dias_espera, data_envio, data_receb):
         st.link_button("📍 Abrir rastreio", link, use_container_width=True)
 
 
+def render_camisas(itens_df: pd.DataFrame, pacote: str, codigo: str):
+    resumo = itens_do_pacote(itens_df, pacote, codigo)
+    if resumo.empty:
+        st.caption("👕 Camisas: não encontradas para este pacote.")
+    else:
+        with st.expander("👕 Ver camisas do pacote", expanded=False):
+            st.dataframe(resumo, use_container_width=True, hide_index=True, height=240)
+
+
 @st.cache_data(show_spinner=False)
 def load_data():
     pac = pd.read_excel(ARQUIVO_EXCEL, sheet_name=SHEET_PACOTES, engine="openpyxl").dropna(how="all")
     it = pd.read_excel(ARQUIVO_EXCEL, sheet_name=SHEET_ITENS, engine="openpyxl").dropna(how="all")
 
-    # Colunas obrigatórias (pra não dar dado errado silencioso)
     required_pac = ["Pacote", "Código de Rastreio", "Data do pedido", "Data do envio", "Data de recebimento", "Status"]
     required_it = ["Pacote", "Código de Rastreio", "Camisa", "Tamanho", "Qtd", "Cliente"]
+
     for c in required_pac:
         if c not in pac.columns:
             raise ValueError(f"Coluna '{c}' não encontrada em {SHEET_PACOTES}. Colunas: {list(pac.columns)}")
@@ -216,7 +210,6 @@ def load_data():
         if c not in it.columns:
             raise ValueError(f"Coluna '{c}' não encontrada em {SHEET_ITENS}. Colunas: {list(it.columns)}")
 
-    # Limpeza
     pac["Pacote"] = pac["Pacote"].apply(
         lambda x: safe_str(int(x)) if isinstance(x, (int, float)) and pd.notna(x) else safe_str(x)
     )
@@ -225,7 +218,6 @@ def load_data():
     it["Pacote"] = it["Pacote"].apply(safe_str)
     it["Código de Rastreio"] = it["Código de Rastreio"].apply(safe_str)
 
-    # Datas
     pac["Data do pedido"] = to_date_series(pac["Data do pedido"])
     pac["Data do envio"] = to_date_series(pac["Data do envio"])
     pac["Data de recebimento"] = to_date_series(pac["Data de recebimento"])
@@ -236,7 +228,7 @@ def load_data():
 # =========================================================
 # APP
 # =========================================================
-today = datetime.now(TZ).date()  # ✅ data certa no seu fuso
+today = datetime.now(TZ).date()
 
 st.markdown(
     """
@@ -250,7 +242,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Carregar
 pacotes_raw, itens_raw = load_data()
 pacotes = prepare_pacotes(pacotes_raw)
 
@@ -271,11 +262,10 @@ st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
 
-# Abas
 tab1, tab2, tab3 = st.tabs(["🔎 Consultar", "⏳ Em trânsito", "✅ Recebidos"])
 
 # -------------------------
-# Tab 1: Consultar
+# Consultar
 # -------------------------
 with tab1:
     q = st.text_input(
@@ -283,7 +273,6 @@ with tab1:
         placeholder="Digite o Pacote ou Código de Rastreio",
         label_visibility="collapsed",
     )
-    mostrar_camisas = st.toggle("Mostrar camisas do pacote", value=True)
 
     if q.strip():
         qq = q.strip().lower()
@@ -307,20 +296,21 @@ with tab1:
                     data_envio=r["Data do envio"],
                     data_receb=r["Data de recebimento"],
                 )
-
-                if mostrar_camisas:
-                    resumo = itens_do_pacote(itens_raw, pacote, codigo)
-                    if not resumo.empty:
-                        with st.expander("👕 Ver camisas", expanded=False):
-                            st.dataframe(resumo, use_container_width=True, hide_index=True, height=240)
+                render_camisas(itens_raw, pacote, codigo)
     else:
         st.info("Digite um pacote ou código acima.")
 
 # -------------------------
-# Tab 2: Em trânsito
+# Em trânsito
 # -------------------------
 with tab2:
-    limite = st.selectbox("Quantidade", [20, 30, 50, 80, 120], index=1)
+    # label escondido (sem "Quantidade")
+    limite = st.selectbox(
+        " ",
+        [20, 30, 50, 80, 120],
+        index=1,
+        label_visibility="collapsed",
+    )
 
     em = pacotes[pacotes["Status público"] == "Em trânsito"].copy()
     em = em.sort_values(by="Dias em espera", ascending=False).head(limite)
@@ -329,38 +319,50 @@ with tab2:
         st.info("Nenhum pacote em trânsito.")
     else:
         for _, r in em.iterrows():
+            pacote = safe_str(r["Pacote"])
+            codigo = safe_str(r["Código de Rastreio"])
+
             render_card(
-                pacote=safe_str(r["Pacote"]),
-                codigo=safe_str(r["Código de Rastreio"]),
+                pacote=pacote,
+                codigo=codigo,
                 status="Em trânsito",
                 dias_espera=r["Dias em espera"],
                 data_envio=r["Data do envio"],
                 data_receb=r["Data de recebimento"],
             )
+            render_camisas(itens_raw, pacote, codigo)
 
 # -------------------------
-# Tab 3: Recebidos
+# Recebidos
 # -------------------------
 with tab3:
-    limite_r = st.selectbox("Quantidade (recebidos)", [20, 30, 50, 80, 120], index=0)
+    # label escondido (sem "Quantidade")
+    limite_r = st.selectbox(
+        "  ",
+        [20, 30, 50, 80, 120],
+        index=0,
+        label_visibility="collapsed",
+    )
 
     rec = pacotes[pacotes["Status público"] == "Recebido"].copy()
-
-    # Ordena por data de recebimento (mais recente primeiro), se tiver data
     rec = rec.sort_values(by="Data de recebimento", ascending=False).head(limite_r)
 
     if rec.empty:
         st.info("Nenhum pacote recebido.")
     else:
         for _, r in rec.iterrows():
+            pacote = safe_str(r["Pacote"])
+            codigo = safe_str(r["Código de Rastreio"])
+
             render_card(
-                pacote=safe_str(r["Pacote"]),
-                codigo=safe_str(r["Código de Rastreio"]),
+                pacote=pacote,
+                codigo=codigo,
                 status="Recebido",
                 dias_espera=np.nan,
                 data_envio=r["Data do envio"],
                 data_receb=r["Data de recebimento"],
             )
+            render_camisas(itens_raw, pacote, codigo)
 
 st.divider()
 st.caption("Painel público • Dados atualizados conforme planilha de controle")
